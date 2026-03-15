@@ -305,8 +305,9 @@ async def on_text(message: Message):
 # =============================================================================
 async def _is_slot_due() -> bool:
     """
-    Return True if there is a scheduled slot that has already started today
-    but for which no post was recorded in that slot's time window yet.
+    Return True only if we are currently inside a scheduled slot's window
+    AND no post has been made in that window yet.
+    Missed/past slots are ignored to avoid catching up with old posts.
     """
     now_kyiv = datetime.now(TIMEZONE)
     today_start = now_kyiv.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -314,8 +315,6 @@ async def _is_slot_due() -> bool:
 
     for i, (hour, minute) in enumerate(POST_TIMES):
         slot_start = today_start.replace(hour=hour, minute=minute)
-        if now_kyiv < slot_start:
-            continue  # Slot hasn't started yet
 
         # Window ends at the next slot's start time (or midnight for the last slot)
         if i + 1 < len(POST_TIMES):
@@ -324,9 +323,12 @@ async def _is_slot_due() -> bool:
         else:
             slot_end = today_start + timedelta(days=1)
 
+        # Only act on the slot whose window we are currently inside
+        if not (slot_start <= now_kyiv < slot_end):
+            continue
+
         already_posted = any(slot_start <= t < slot_end for t in posted_times)
-        if not already_posted:
-            return True
+        return not already_posted
 
     return False
 
