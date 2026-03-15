@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 import aiosqlite
+from aiohttp import web
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -19,6 +20,7 @@ import pytz
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 
 # =============================================================================
 # CONFIGURATION — values are loaded from .env (BOT_TOKEN, ADMIN_ID, CHANNEL_ID)
@@ -38,6 +40,12 @@ TIMEZONE = pytz.timezone("Europe/Kyiv")
 
 # Fixed posting times (hour, minute) in Europe/Kyiv:
 POST_TIMES = [(8, 0), (13, 0), (16, 0), (19, 0)]
+
+# Webhook config (Railway sets RAILWAY_PUBLIC_DOMAIN and PORT automatically):
+WEBHOOK_HOST = os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
+PORT = int(os.getenv("PORT", "8080"))
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL = f"https://{WEBHOOK_HOST}{WEBHOOK_PATH}" if WEBHOOK_HOST else ""
 
 # =============================================================================
 # Logging
@@ -396,18 +404,39 @@ async def main():
     dp = Dispatcher()
     dp.include_router(router)
 
-    scheduler = asyncio.create_task(scheduler_loop(bot))
-
-    try:
-        logger.info("Bot starting.")
-        await dp.start_polling(bot)
-    finally:
-        scheduler.cancel()
+    if WEBHOOK_URL:
+        # Webhook mode — used on Railway (no polling conflict between instances)
+        await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
+        scheduler = asyncio.create_task(scheduler_loop(bot))
         try:
-            await scheduler
-        except asyncio.CancelledError:
-            pass
-        await bot.session.close()
+            app = web.Application()
+            SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            await web.TCPSite(runner, host="0.0.0.0", port=PORT).start()
+            logger.info("Bot starting in webhook mode: %s", WEBHOOK_URL)
+            await asyncio.Event().wait()  # run until cancelled
+        finally:
+            scheduler.cancel()
+            try:
+                await scheduler
+            except asyncio.CancelledError:
+                pass
+            await bot.delete_webhook()
+            await bot.session.close()
+    else:
+        # Long polling mode — used for local development
+        scheduler = asyncio.create_task(scheduler_loop(bot))
+        try:
+            logger.info("Bot starting in polling mode.")
+            await dp.start_polling(bot)
+        finally:
+            scheduler.cancel()
+            try:
+                await scheduler
+            except asyncio.CancelledError:
+                pass
+            await bot.session.close()
 
 
 if __name__ == "__main__":
