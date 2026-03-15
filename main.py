@@ -27,8 +27,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()  # @channel or -1001234567890
 
-# SQLite database file path:
-DB_PATH = Path(__file__).parent / "meme_bot.db"
+# SQLite database file path (override DATA_DIR env var to point to a persistent volume):
+DB_PATH = Path(os.getenv("DATA_DIR", str(Path(__file__).parent))) / "meme_bot.db"
 
 # Scheduler: check every N minutes:
 SCHEDULER_INTERVAL_MINUTES = 5
