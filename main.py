@@ -88,18 +88,19 @@ async def queue_add(file_id: Optional[str], caption: Optional[str], message_type
 
 
 async def queue_get_next():
-    """Get the next queue item (FIFO) and remove it. Returns (id, file_id, caption, message_type) or None."""
+    """Get the next queue item (FIFO) and remove it atomically. Returns (id, file_id, caption, message_type) or None."""
     async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT id, file_id, caption, message_type FROM queue ORDER BY id ASC LIMIT 1"
-        ) as cur:
+        # DELETE ... RETURNING is atomic — no other process can get the same row
+        async with db.execute("""
+            DELETE FROM queue WHERE id = (
+                SELECT id FROM queue ORDER BY id ASC LIMIT 1
+            ) RETURNING id, file_id, caption, message_type
+        """) as cur:
             row = await cur.fetchone()
-        if row is None:
-            return None
-        await db.execute("DELETE FROM queue WHERE id = ?", (row["id"],))
         await db.commit()
-        return (row["id"], row["file_id"], row["caption"], row["message_type"])
+    if row is None:
+        return None
+    return (row[0], row[1], row[2], row[3])
 
 
 async def queue_count() -> int:
@@ -191,6 +192,7 @@ def is_admin(message: Message) -> bool:
 # Handlers
 # =============================================================================
 router = Router()
+_post_lock = asyncio.Lock()
 
 
 @router.message(Command("stats"))
@@ -339,31 +341,32 @@ async def try_post_one(bot: Bot, force: bool = False):
     Returns (True, None) if posted, or (False, reason_string) if not.
     If force=True, skips schedule checks.
     """
-    if not force:
-        if not await _is_slot_due():
-            return (False, "no scheduled slot is due right now")
+    async with _post_lock:
+        if not force:
+            if not await _is_slot_due():
+                return (False, "no scheduled slot is due right now")
 
-    item = await queue_get_next()
-    if item is None:
-        return (False, "queue is empty")
+        item = await queue_get_next()
+        if item is None:
+            return (False, "queue is empty")
 
-    _id, file_id, caption, message_type = item
-    caption = caption or None
+        _id, file_id, caption, message_type = item
+        caption = caption or None
 
-    try:
-        if message_type == "photo":
-            await bot.send_photo(CHANNEL_ID, photo=file_id, caption=caption)
-        elif message_type == "video":
-            await bot.send_video(CHANNEL_ID, video=file_id, caption=caption)
-        else:
-            await bot.send_message(CHANNEL_ID, text=caption or "(no text)")
-        await history_add_post()
-        logger.info("Posted to channel: type=%s", message_type)
-        return (True, None)
-    except Exception as e:
-        logger.exception("Failed to post to channel: %s", e)
-        await queue_add(file_id or None, caption, message_type)
-        return (False, f"send failed: {e}")
+        try:
+            if message_type == "photo":
+                await bot.send_photo(CHANNEL_ID, photo=file_id, caption=caption)
+            elif message_type == "video":
+                await bot.send_video(CHANNEL_ID, video=file_id, caption=caption)
+            else:
+                await bot.send_message(CHANNEL_ID, text=caption or "(no text)")
+            await history_add_post()
+            logger.info("Posted to channel: type=%s", message_type)
+            return (True, None)
+        except Exception as e:
+            logger.exception("Failed to post to channel: %s", e)
+            await queue_add(file_id or None, caption, message_type)
+            return (False, f"send failed: {e}")
 
 
 async def scheduler_loop(bot: Bot):
