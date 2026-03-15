@@ -1,12 +1,12 @@
 """
-Telegram Meme Bot — receives memes from admin, queues them, drip-feeds to channel (max 3/day).
+Telegram Meme Bot — receives memes from admin, queues them, posts to channel
+at fixed times: 08:00, 13:00, 16:00, 19:00 (Europe/Kyiv). Max 4 posts/day.
 Uses aiogram 3.x and aiosqlite.
 """
 
 import asyncio
 import logging
 import os
-import random
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -30,17 +30,14 @@ CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()  # @channel or -1001234567890
 # SQLite database file path:
 DB_PATH = Path(__file__).parent / "meme_bot.db"
 
-# Scheduler: check every N minutes whether to post next item:
+# Scheduler: check every N minutes:
 SCHEDULER_INTERVAL_MINUTES = 5
 
-# Timezone for "today" and working hours:
+# Timezone for scheduling:
 TIMEZONE = pytz.timezone("Europe/Kyiv")
-WORK_START_HOUR, WORK_START_MINUTE = 9, 0   # 09:00
-WORK_END_HOUR, WORK_END_MINUTE = 22, 0     # 22:00
 
-# Minimum gap between two posts (hours). Random extra 0–2h for natural spread (total 3–5h):
-MIN_GAP_HOURS = 3
-MAX_EXTRA_GAP_HOURS = 2
+# Fixed posting times (hour, minute) in Europe/Kyiv:
+POST_TIMES = [(8, 0), (13, 0), (16, 0), (19, 0)]
 
 # =============================================================================
 # Logging
@@ -79,7 +76,7 @@ async def init_db():
 
 
 async def queue_add(file_id: Optional[str], caption: Optional[str], message_type: str):
-    """Append one item to the queue (one row per photo/video/text — ungrouped)."""
+    """Append one item to the queue."""
     now = datetime.utcnow().isoformat() + "Z"
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -113,48 +110,23 @@ async def queue_count() -> int:
     return n
 
 
-async def history_add_post():
-    """Record that a post was sent now (for daily limit)."""
-    now = datetime.utcnow().isoformat() + "Z"
+async def queue_list():
+    """Return all queued items in order."""
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT INTO history (posted_at) VALUES (?)", (now,))
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, file_id, caption, message_type FROM queue ORDER BY id ASC"
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def queue_delete(item_id: int) -> bool:
+    """Delete item by id. Returns True if found and deleted."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("DELETE FROM queue WHERE id = ?", (item_id,))
         await db.commit()
-
-
-def _today_start_end_utc():
-    """Return (start, end) of 'today' in Europe/Kyiv as UTC datetimes."""
-    now_kyiv = datetime.now(TIMEZONE)
-    start_kyiv = now_kyiv.replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    end_kyiv = start_kyiv + timedelta(days=1)
-    return start_kyiv.astimezone(pytz.UTC), end_kyiv.astimezone(pytz.UTC)
-
-
-async def history_count_today() -> int:
-    """Count how many posts were sent today (Europe/Kyiv date)."""
-    start_utc, end_utc = _today_start_end_utc()
-    start_ts = start_utc.isoformat()
-    end_ts = end_utc.isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT COUNT(*) FROM history WHERE posted_at >= ? AND posted_at < ?",
-            (start_ts, end_ts),
-        ) as cur:
-            (n,) = await cur.fetchone()
-    return n
-
-
-async def history_last_posted_at() -> Optional[datetime]:
-    """Return UTC datetime of the last post, or None if no posts."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT posted_at FROM history ORDER BY id DESC LIMIT 1"
-        ) as cur:
-            row = await cur.fetchone()
-    if row is None:
-        return None
-    return datetime.fromisoformat(row[0].replace("Z", "+00:00"))
+        return cursor.rowcount > 0
 
 
 async def queue_clear():
@@ -165,6 +137,49 @@ async def queue_clear():
     logger.info("Queue cleared.")
 
 
+async def history_add_post():
+    """Record that a post was sent now (for daily scheduling)."""
+    now = datetime.utcnow().isoformat() + "Z"
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT INTO history (posted_at) VALUES (?)", (now,))
+        await db.commit()
+
+
+def _today_start_end_utc():
+    """Return (start, end) of 'today' in Europe/Kyiv as UTC datetimes."""
+    now_kyiv = datetime.now(TIMEZONE)
+    start_kyiv = now_kyiv.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_kyiv = start_kyiv + timedelta(days=1)
+    return start_kyiv.astimezone(pytz.UTC), end_kyiv.astimezone(pytz.UTC)
+
+
+async def history_count_today() -> int:
+    """Count how many posts were sent today (Europe/Kyiv date)."""
+    start_utc, end_utc = _today_start_end_utc()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM history WHERE posted_at >= ? AND posted_at < ?",
+            (start_utc.isoformat(), end_utc.isoformat()),
+        ) as cur:
+            (n,) = await cur.fetchone()
+    return n
+
+
+async def history_get_today_kyiv_times():
+    """Return list of Kyiv-timezone datetimes for all posts made today."""
+    start_utc, end_utc = _today_start_end_utc()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT posted_at FROM history WHERE posted_at >= ? AND posted_at < ?",
+            (start_utc.isoformat(), end_utc.isoformat()),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [
+        datetime.fromisoformat(row[0].replace("Z", "+00:00")).astimezone(TIMEZONE)
+        for row in rows
+    ]
+
+
 # =============================================================================
 # Admin check
 # =============================================================================
@@ -173,28 +188,65 @@ def is_admin(message: Message) -> bool:
 
 
 # =============================================================================
-# Handlers — COMMANDS FIRST (so they are not caught by generic text handler)
+# Handlers
 # =============================================================================
 router = Router()
 
 
-# ---------- Commands (registered first so they match before generic F.text) ----------
 @router.message(Command("stats"))
 async def cmd_stats(message: Message):
-    print("cmd_stats: message.from_user.id =", message.from_user.id if message.from_user else None)
     if not is_admin(message):
         return
     q = await queue_count()
     today = await history_count_today()
-    await message.reply(f"Queue: {q} items. Posted today: {today}/3.")
+    times_str = ", ".join(f"{h:02d}:{m:02d}" for h, m in POST_TIMES)
+    await message.reply(f"Queue: {q} items.\nPosted today: {today}/{len(POST_TIMES)}.\nSchedule: {times_str} (Kyiv).")
+
+
+@router.message(Command("queue"))
+async def cmd_queue(message: Message):
+    if not is_admin(message):
+        return
+    items = await queue_list()
+    if not items:
+        await message.reply("Queue is empty.")
+        return
+
+    lines = [f"Queue ({len(items)} items):"]
+    for item in items[:50]:
+        content = item["caption"] or ""
+        preview = (content[:40] + "…") if len(content) > 40 else content
+        preview = preview or "(no caption)"
+        lines.append(f"#{item['id']} [{item['message_type']}] {preview}")
+
+    if len(items) > 50:
+        lines.append(f"… and {len(items) - 50} more")
+
+    lines.append("\nUse /delete <id> to remove an item.")
+    await message.reply("\n".join(lines))
+
+
+@router.message(Command("delete"))
+async def cmd_delete(message: Message):
+    if not is_admin(message):
+        return
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) < 2 or not args[1].strip().isdigit():
+        await message.reply("Usage: /delete <id>")
+        return
+    item_id = int(args[1].strip())
+    deleted = await queue_delete(item_id)
+    if deleted:
+        await message.reply(f"Item #{item_id} deleted from queue.")
+    else:
+        await message.reply(f"Item #{item_id} not found in queue.")
 
 
 @router.message(Command("force"))
 async def cmd_force(message: Message):
-    print("cmd_force: message.from_user.id =", message.from_user.id if message.from_user else None)
     if not is_admin(message):
         return
-    posted, reason = await try_post_one(message.bot)
+    posted, reason = await try_post_one(message.bot, force=True)
     if posted:
         await message.reply("Posted one item to the channel.")
     else:
@@ -203,7 +255,6 @@ async def cmd_force(message: Message):
 
 @router.message(Command("clear"))
 async def cmd_clear(message: Message):
-    print("cmd_clear: message.from_user.id =", message.from_user.id if message.from_user else None)
     if not is_admin(message):
         return
     await queue_clear()
@@ -211,13 +262,15 @@ async def cmd_clear(message: Message):
 
 
 # ---------- Meme content (photo, video, text) — after commands ----------
+
 @router.message(F.photo)
 async def on_photo(message: Message):
     if not is_admin(message):
         return
-    # Albums: each photo is a separate update; we save each as its own row (ungrouping).
     photo = message.photo[-1]
-    await queue_add(photo.file_id, message.caption or None, "photo")
+    # Don't copy caption from forwarded messages
+    caption = None if message.forward_origin else (message.caption or None)
+    await queue_add(photo.file_id, caption, "photo")
     await message.reply("Photo added to queue.")
 
 
@@ -228,48 +281,65 @@ async def on_video(message: Message):
     video = message.video
     if video is None:
         return
-    await queue_add(video.file_id, message.caption or None, "video")
+    # Don't copy caption from forwarded messages
+    caption = None if message.forward_origin else (message.caption or None)
+    await queue_add(video.file_id, caption, "video")
     await message.reply("Video added to queue.")
 
 
-# Text memes only; exclude commands by filter so /stats, /force, /clear are not queued.
+# Text memes only; exclude commands so /stats, /queue, etc. are not queued.
 @router.message(F.text, ~F.text.startswith("/"))
 async def on_text(message: Message):
     if not is_admin(message):
+        return
+    # Forwarded text messages carry someone else's text — skip them
+    if message.forward_origin:
+        await message.reply("Forwarded text messages are not queued (no content to post).")
         return
     await queue_add(None, message.text or "", "text")
     await message.reply("Text added to queue.")
 
 
 # =============================================================================
-# Scheduler: drip-feed queue to channel (max 3/day, working hours, 3–5h gap)
+# Scheduler: post at fixed times 08:00, 13:00, 16:00, 19:00 (Europe/Kyiv)
 # =============================================================================
-def _is_working_hours(now_kyiv: datetime) -> bool:
-    start = now_kyiv.replace(hour=WORK_START_HOUR, minute=WORK_START_MINUTE, second=0, microsecond=0)
-    end = now_kyiv.replace(hour=WORK_END_HOUR, minute=WORK_END_MINUTE, second=0, microsecond=0)
-    return start <= now_kyiv <= end
+async def _is_slot_due() -> bool:
+    """
+    Return True if there is a scheduled slot that has already started today
+    but for which no post was recorded in that slot's time window yet.
+    """
+    now_kyiv = datetime.now(TIMEZONE)
+    today_start = now_kyiv.replace(hour=0, minute=0, second=0, microsecond=0)
+    posted_times = await history_get_today_kyiv_times()
+
+    for i, (hour, minute) in enumerate(POST_TIMES):
+        slot_start = today_start.replace(hour=hour, minute=minute)
+        if now_kyiv < slot_start:
+            continue  # Slot hasn't started yet
+
+        # Window ends at the next slot's start time (or midnight for the last slot)
+        if i + 1 < len(POST_TIMES):
+            next_hour, next_minute = POST_TIMES[i + 1]
+            slot_end = today_start.replace(hour=next_hour, minute=next_minute)
+        else:
+            slot_end = today_start + timedelta(days=1)
+
+        already_posted = any(slot_start <= t < slot_end for t in posted_times)
+        if not already_posted:
+            return True
+
+    return False
 
 
-async def try_post_one(bot: Bot):
+async def try_post_one(bot: Bot, force: bool = False):
     """
     Try to post one item from the queue to the channel.
     Returns (True, None) if posted, or (False, reason_string) if not.
+    If force=True, skips schedule checks.
     """
-    now_kyiv = datetime.now(TIMEZONE)
-    if not _is_working_hours(now_kyiv):
-        return (False, "outside working hours (09:00–22:00 Europe/Kyiv)")
-
-    posts_today = await history_count_today()
-    if posts_today >= 3:
-        return (False, "daily limit reached (3 posts today)")
-
-    last = await history_last_posted_at()
-    if last is not None:
-        gap_hours = MIN_GAP_HOURS + random.uniform(0, MAX_EXTRA_GAP_HOURS)
-        next_ok = last + timedelta(hours=gap_hours)
-        now_utc = datetime.now(pytz.UTC)
-        if now_utc < next_ok:
-            return (False, "too soon since last post (3–5h gap required)")
+    if not force:
+        if not await _is_slot_due():
+            return (False, "no scheduled slot is due right now")
 
     item = await queue_get_next()
     if item is None:
@@ -295,7 +365,7 @@ async def try_post_one(bot: Bot):
 
 
 async def scheduler_loop(bot: Bot):
-    """Background task: every few minutes, try to post one item if conditions are met."""
+    """Background task: every few minutes, try to post if a slot is due."""
     while True:
         try:
             await try_post_one(bot)
@@ -310,7 +380,6 @@ async def scheduler_loop(bot: Bot):
 # Entry point
 # =============================================================================
 async def main():
-    # Put your Bot Token here or in env; this placeholder will fail at runtime as a reminder:
     if not BOT_TOKEN:
         raise ValueError("Set BOT_TOKEN in .env. Get the token from @BotFather.")
     if not CHANNEL_ID:
@@ -322,7 +391,6 @@ async def main():
     dp = Dispatcher()
     dp.include_router(router)
 
-    # Run scheduler in background
     scheduler = asyncio.create_task(scheduler_loop(bot))
 
     try:
