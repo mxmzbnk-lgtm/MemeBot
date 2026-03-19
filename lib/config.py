@@ -4,6 +4,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
+CRON_SECRET = os.getenv("CRON_SECRET", "").strip()
 
 KV_REST_API_URL = os.getenv("KV_REST_API_URL", "").strip()
 KV_REST_API_TOKEN = os.getenv("KV_REST_API_TOKEN", "").strip()

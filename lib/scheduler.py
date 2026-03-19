@@ -16,12 +16,8 @@ from lib.config import (
 
 TZ = pytz.timezone(TZ_NAME)
 
-# Telegram requires schedule_date to be at least this many seconds in the future.
-_MIN_FUTURE_SECONDS = 100
-
 
 def _slots_on_date(slots: list[float], date) -> int:
-    """Count how many slots fall on a given Kyiv calendar date."""
     count = 0
     for ts in slots:
         dt = datetime.fromtimestamp(ts, tz=TZ)
@@ -31,12 +27,10 @@ def _slots_on_date(slots: list[float], date) -> int:
 
 
 def _clamp_to_working_hours(dt: datetime) -> datetime:
-    """If dt is outside working hours, push to next valid window."""
     if dt.hour < WORK_START_HOUR:
         dt = dt.replace(hour=WORK_START_HOUR, minute=0, second=0, microsecond=0)
         dt += timedelta(minutes=random.randint(0, 30))
     elif dt.hour >= WORK_END_HOUR:
-        # Push to next day 09:00
         dt = (dt + timedelta(days=1)).replace(
             hour=WORK_START_HOUR, minute=0, second=0, microsecond=0
         )
@@ -51,41 +45,32 @@ def find_next_slot(future_slots: list[float]) -> int:
         future_slots: list of Unix timestamps of already-scheduled future posts.
 
     Returns:
-        Unix timestamp (int) suitable for Telegram's schedule_date parameter.
+        Unix timestamp (int).
     """
     now = datetime.now(TZ)
 
-    # Determine candidate based on existing slots
     if not future_slots:
-        candidate = now
+        candidate = now + timedelta(minutes=random.randint(3, 10))
     else:
         last_slot = max(future_slots)
         gap = random.uniform(MIN_GAP_HOURS, MAX_GAP_HOURS)
         candidate = datetime.fromtimestamp(last_slot, tz=TZ) + timedelta(hours=gap)
 
-    # Clamp to working hours
     candidate = _clamp_to_working_hours(candidate)
 
-    # Check daily limit — if exceeded, roll to next day(s)
     for _ in range(365):
         day_count = _slots_on_date(future_slots, candidate.date())
         if day_count < MAX_DAILY_POSTS:
             break
-        # Roll to next day
         candidate = (candidate + timedelta(days=1)).replace(
             hour=WORK_START_HOUR, minute=0, second=0, microsecond=0
         )
         candidate += timedelta(minutes=random.randint(0, 30))
-    else:
-        # Fallback — should never happen in practice
-        candidate = now + timedelta(days=1)
 
-    # Ensure candidate is far enough in the future for Telegram
-    min_future = now + timedelta(seconds=_MIN_FUTURE_SECONDS)
+    # Ensure slot is in the future
+    min_future = now + timedelta(minutes=2)
     if candidate < min_future:
         candidate = min_future
-
-    # Re-clamp after possible min_future adjustment
-    candidate = _clamp_to_working_hours(candidate)
+        candidate = _clamp_to_working_hours(candidate)
 
     return int(candidate.timestamp())

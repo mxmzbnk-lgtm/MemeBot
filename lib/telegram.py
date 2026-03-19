@@ -15,43 +15,22 @@ def _post(method: str, data: dict) -> dict:
     return resp.json()
 
 
-def send_photo(
-    chat_id: str,
-    photo: str,
-    caption: Optional[str] = None,
-    schedule_date: Optional[int] = None,
-) -> dict:
+def send_photo(chat_id: str, photo: str, caption: Optional[str] = None) -> dict:
     payload: dict = {"chat_id": chat_id, "photo": photo}
     if caption:
         payload["caption"] = caption
-    if schedule_date:
-        payload["schedule_date"] = schedule_date
     return _post("sendPhoto", payload)
 
 
-def send_video(
-    chat_id: str,
-    video: str,
-    caption: Optional[str] = None,
-    schedule_date: Optional[int] = None,
-) -> dict:
+def send_video(chat_id: str, video: str, caption: Optional[str] = None) -> dict:
     payload: dict = {"chat_id": chat_id, "video": video}
     if caption:
         payload["caption"] = caption
-    if schedule_date:
-        payload["schedule_date"] = schedule_date
     return _post("sendVideo", payload)
 
 
-def send_message(
-    chat_id: str,
-    text: str,
-    schedule_date: Optional[int] = None,
-) -> dict:
-    payload: dict = {"chat_id": chat_id, "text": text}
-    if schedule_date:
-        payload["schedule_date"] = schedule_date
-    return _post("sendMessage", payload)
+def send_message(chat_id: str, text: str) -> dict:
+    return _post("sendMessage", {"chat_id": chat_id, "text": text})
 
 
 def reply(chat_id: int, message_id: int, text: str) -> dict:
