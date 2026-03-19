@@ -57,7 +57,7 @@ WEBHOOK_SECRET=your-secret \
 python scripts/set_webhook.py
 ```
 
-Має вивести: `Webhook set successfully: https://meme-bot-xyz.vercel.app/api/webhook`
+Має вивести: `Webhook set successfully: https://meme-bot-xyz.vercel.app/api`
 
 ## Крок 6: Перевірити
 

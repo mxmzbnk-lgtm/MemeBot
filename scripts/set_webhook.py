@@ -27,7 +27,7 @@ def main():
         print("ERROR: VERCEL_URL is not set. Example: https://your-app.vercel.app")
         sys.exit(1)
 
-    webhook_url = f"{VERCEL_URL}/api/webhook"
+    webhook_url = f"{VERCEL_URL}/api"
 
     import httpx
 
