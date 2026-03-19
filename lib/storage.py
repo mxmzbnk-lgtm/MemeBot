@@ -34,7 +34,7 @@ def get_future_slots() -> list[float]:
     # Clean up past slots
     r.zremrangebyscore(_KEY, "-inf", now)
     # Get remaining future slots
-    results = r.zrange(_KEY, now, "+inf", byscore=True)
+    results = r.zrangebyscore(_KEY, now, "+inf")
     return [float(ts) for ts in results]
 
 
